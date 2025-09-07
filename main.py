@@ -11,50 +11,75 @@ from tkinter import filedialog
 
 def detect_and_highlight_circle_pil(pil_img):
     """
-    Detects concentric circles in a PIL image, highlights them, and returns a new PIL image.
+    Detects up to three black dots (blue highlight). If only two are found,
+    also tries to find a white dot with a black circle around it (red highlight).
+    Returns a new PIL image.
     """
     # Convert PIL image to OpenCV format
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    h, w = cv_img.shape[:2]
-    region = (0, 0, w, h)
-    # Convert to grayscale
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 5)
+    # Threshold to find black dots
+    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Detect small (inner) circles (white)
-    inner_circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=1,
-        minDist=20,
-        param1=100,
-        param2=30,
-        minRadius=14,
-        maxRadius=18
-    )
+    black_circles = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 400 or area > 1100:
+            continue  # Filter by area (approximate for radius 14-18)
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+        if radius < 12 or radius > 18:
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * np.pi * (area / (perimeter * perimeter))
+        if circularity > 0.7:
+            black_circles.append((int(x), int(y), int(radius), circularity, area))
 
-    # Detect large (outer) circles (black)
-    outer_circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=1,
-        minDist=20,
-        param1=100,
-        param2=30,
-        minRadius=30,
-        maxRadius=35
-    )
+    # Sort by circularity, keep up to 3
+    black_circles = sorted(black_circles, key=lambda x: -x[3])[:3]
+    # Draw black dots in blue
+    for x, y, r, _, _ in black_circles:
+        cv2.circle(cv_img, (x, y), r, (255, 0, 0), 3)  # Blue
 
-    found = False
-    if inner_circles is not None and outer_circles is not None:
-        inner_circles = np.uint16(np.around(inner_circles[0]))
-        outer_circles = np.uint16(np.around(outer_circles[0]))
-        for icx, icy, ir in inner_circles:
-            for ocx, ocy, orad in outer_circles:
-                if abs(icx - ocx) < 5 and abs(icy - ocy) < 5:
-                    cv2.circle(cv_img, (ocx, ocy), orad, (0, 0, 255), 3)
-                    cv2.circle(cv_img, (icx, icy), ir, (0, 0, 255), 3)
-                    found = True
+    # If only two black dots found, try to find a white dot with black circle
+    if len(black_circles) == 2:
+        # Use HoughCircles to find concentric circles (white inside black)
+        gray_blur = cv2.medianBlur(gray, 5)
+        # Inner (white) circle
+        inner_circles = cv2.HoughCircles(
+            gray_blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=20,
+            param1=100,
+            param2=30,
+            minRadius=14,
+            maxRadius=18
+        )
+        # Outer (black) circle
+        outer_circles = cv2.HoughCircles(
+            gray_blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=20,
+            param1=100,
+            param2=30,
+            minRadius=30,
+            maxRadius=35
+        )
+        if inner_circles is not None and outer_circles is not None:
+            inner_circles = np.uint16(np.around(inner_circles[0]))
+            outer_circles = np.uint16(np.around(outer_circles[0]))
+            for icx, icy, ir in inner_circles:
+                for ocx, ocy, orad in outer_circles:
+                    if abs(icx - ocx) < 5 and abs(icy - ocy) < 5:
+                        # Draw both circles in red
+                        cv2.circle(cv_img, (ocx, ocy), orad, (0, 0, 255), 3)
+                        cv2.circle(cv_img, (icx, icy), ir, (0, 0, 255), 3)
+                        break
+
     # Convert back to PIL
     result_pil = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
     return result_pil
