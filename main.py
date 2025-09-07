@@ -8,13 +8,13 @@ from PIL import Image, ImageTk
 
 def detect_and_highlight_circle(image_path, region, output_path):
     """
-    Detects a white inner circle (~33px ±4px) in a given region of an image.
-    If found, highlights it in red.
+    Detects a black circle (~65px ±4px) with a white inner circle (~33px ±4px)
+    in a given region of an image. If found, highlights both in red.
 
     :param image_path: Path to input image
     :param region: (x, y, w, h) specifying the region of interest
     :param output_path: Path to save output image
-    :return: True if circle found, False otherwise
+    :return: True if circle pair found, False otherwise
     """
 
     # Load image
@@ -31,28 +31,44 @@ def detect_and_highlight_circle(image_path, region, output_path):
 
     found = False
 
-    # Detect circles using Hough transform (inner white circle)
-    circles = cv2.HoughCircles(
+    # Detect small (inner) circles (white)
+    inner_circles = cv2.HoughCircles(
         gray,
         cv2.HOUGH_GRADIENT,
         dp=1,
         minDist=20,
         param1=100,
         param2=30,
-        minRadius=28,
-        maxRadius=36
+        minRadius=14,
+        maxRadius=18
     )
 
-    if circles is not None:
-        circles = np.uint16(np.around(circles))
-        for cx, cy, r in circles[0, :]:
-            # Draw red highlight on the original image (adjusted for region offset)
-            cv2.circle(image, (x+cx, y+cy), r, (0, 0, 255), 3)
-            found = True
+    # Detect large (outer) circles (black)
+    outer_circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=20,
+        param1=100,
+        param2=30,
+        minRadius=30,
+        maxRadius=35
+    )
 
+    if inner_circles is not None and outer_circles is not None:
+        inner_circles = np.uint16(np.around(inner_circles[0]))
+        outer_circles = np.uint16(np.around(outer_circles[0]))
+        # Find pairs of circles with close centers
+        for icx, icy, ir in inner_circles:
+            for ocx, ocy, orad in outer_circles:
+                if abs(icx - ocx) < 5 and abs(icy - ocy) < 5:
+                    # Draw both circles in red on the original image (adjusted for region offset)
+                    cv2.circle(image, (x+ocx, y+ocy), orad, (0, 0, 255), 3)
+                    cv2.circle(image, (x+icx, y+icy), ir, (0, 0, 255), 3)
+                    found = True
+    # Always save the output image, even if not found
     cv2.imwrite(output_path, image)
     return found
-
 
 class ImageCanvas(tk.Canvas):
     def __init__(self, master, **kwargs):
@@ -202,9 +218,9 @@ class MainWindow:
         self.result_img = cv2.imread(temp_output)
         self.canvas.set_image(self.result_img)
         if found:
-            messagebox.showinfo("Result", "Circle found and highlighted.")
+            messagebox.showinfo("Result", "Concentric circles found and highlighted.")
         else:
-            messagebox.showinfo("Result", "No matching circle found.")
+            messagebox.showinfo("Result", "No matching concentric circles found.")
 
 if __name__ == "__main__":
     root = tk.Tk()
