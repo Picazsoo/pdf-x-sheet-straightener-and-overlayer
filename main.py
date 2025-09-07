@@ -1,18 +1,40 @@
-import cv2
-import numpy as np
 import sys
-import os
-from pdf2image import convert_from_path
-from PIL import Image
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import landscape, portrait
 import tkinter as tk
 from tkinter import filedialog
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from pdf2image import convert_from_path
+
+PAGE_TYPE_50_COORDS = [
+    [384, 132, 9],
+    [1364, 132, 10],
+    [2453, 132, 6],
+    [384, 2200, 9],
+    [1364, 2200, 10],
+    [2453, 2200, 6],
+]
+
+PAGE_TYPE_100_COORDS = [
+    [384, 155, 9],
+    [1364, 155, 10],
+    [2453, 155, 6],
+    [384, 645, 9],
+    [1364, 645, 10],
+    [2453, 645, 6],
+    [384, 1163, 9],
+    [1364, 1163, 10],
+    [2453, 1163, 6],
+    [384, 1680, 9],
+    [1364, 1680, 10],
+    [2453, 1680, 6],
+]
 
 def find_reference_points(pil_img):
     """
     Finds up to three black dots. If only two, tries to find a white dot with black circle.
-    Returns a list of (x, y) tuples for the detected points.
+    Returns a list of (x, y, type) tuples for the detected points, where type is "BLACK" or "WHITE".
     """
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
@@ -32,7 +54,7 @@ def find_reference_points(pil_img):
             continue
         circularity = 4 * np.pi * (area / (perimeter * perimeter))
         if circularity > 0.7:
-            points.append((int(x), int(y)))
+            points.append((int(x), int(y), "BLACK"))
 
     # If only two black dots, try to find a white dot with black circle
     if len(points) == 2:
@@ -62,9 +84,8 @@ def find_reference_points(pil_img):
             outer_circles = np.uint16(np.around(outer_circles[0]))
             for icx, icy, ir in inner_circles:
                 for ocx, ocy, orad in outer_circles:
-                    # Cast to int to avoid overflow in subtraction
                     if abs(int(icx) - int(ocx)) < 5 and abs(int(icy) - int(ocy)) < 5:
-                        points.append((int(icx), int(icy)))
+                        points.append((int(icx), int(icy), "WHITE"))
                         break
     return points
 
@@ -73,13 +94,13 @@ def transform_image_by_points(pil_img, points):
     Transforms the image so that the leftmost point is at (284, 2194) and the rightmost at (3284, 2194).
     Only rotates and scales horizontally (no vertical scaling).
     """
+    # Use only coordinates for transformation
     if len(points) < 2:
         return pil_img  # Not enough points to transform
 
-    # Find leftmost and rightmost points
     pts = sorted(points, key=lambda p: p[0])
-    left = np.array(pts[0], dtype=np.float32)
-    right = np.array(pts[-1], dtype=np.float32)
+    left = np.array((pts[0][0], pts[0][1]), dtype=np.float32)
+    right = np.array((pts[-1][0], pts[-1][1]), dtype=np.float32)
 
     # Target positions
     target_left = np.array([284, 2194], dtype=np.float32)
@@ -189,17 +210,51 @@ def ensure_landscape(pil_img):
         return pil_img.rotate(90, expand=True)
     return pil_img
 
+def get_page_type(points):
+    """
+    Returns 'PAGE_TYPE_50' or 'PAGE_TYPE_100' based on detected points.
+    3 black dots = PAGE_TYPE_50
+    2 black + 1 white = PAGE_TYPE_100
+    """
+    black_count = sum(1 for p in points if p[2] == "BLACK")
+    white_count = sum(1 for p in points if p[2] == "WHITE")
+    if black_count == 3:
+        return 'PAGE_TYPE_50'
+    if black_count == 2 and white_count == 1:
+        return 'PAGE_TYPE_100'
+    # Fallback: treat as PAGE_TYPE_50
+    return 'PAGE_TYPE_50'
+
+def overlay_text_fields(pil_img, coords, counter_start):
+    """
+    Draws text at given coords on pil_img, incrementing counter by step for each.
+    Returns the new image and the next counter value.
+    """
+    img = pil_img.copy()
+    draw = ImageDraw.Draw(img)
+    # Try to use a monospaced font, fallback to default
+    try:
+        font = ImageFont.truetype("arial.ttf", 48)
+    except:
+        font = ImageFont.load_default()
+    counter = counter_start
+    for x, y, step in coords:
+        draw.text((x, y), str(counter), fill=(0, 0, 0), font=font)
+        counter += step
+    return img, counter
+
 def process_pdf(input_pdf, output_pdf):
     try:
         # Convert PDF to images
         pages = convert_from_path(input_pdf)
     except Exception as e:
         print("Error: Unable to convert PDF to images. Make sure Poppler is installed and in your PATH.")
-        print("See: https://github.com/oschwartz10612/poppler-windows or install poppler-utils via your package manager.")
+        print("See: https://github.com/oschwartz10612/poppler-windows or install poppler-utils via your package manager. E.g. winget install --id=oschwartz10612.Poppler  -e. You might need to create system variable POPPLER_PATH pointing to the bin folder inside the poppler folder.")
         print(f"Original error: {e}")
         sys.exit(1)
     processed_images = []
     target_size = (3918, 2479)  # width, height
+    counter = 1  # Start counter for the document
     for idx, page in enumerate(pages):
         img = ensure_landscape(page)
         img = img.resize(target_size, Image.LANCZOS)
@@ -208,6 +263,13 @@ def process_pdf(input_pdf, output_pdf):
         img = transform_image_by_points(img, points)
         # --- Highlight after transformation ---
         img = detect_and_highlight_circle_pil(img)
+        # --- Determine page type and overlay text ---
+        page_type = get_page_type(points)
+        if page_type == 'PAGE_TYPE_50':
+            coords = PAGE_TYPE_50_COORDS
+        else:
+            coords = PAGE_TYPE_100_COORDS
+        img, counter = overlay_text_fields(img, coords, counter)
         processed_images.append(img)
 
     # Save images as PDF
