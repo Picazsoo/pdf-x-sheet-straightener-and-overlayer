@@ -207,10 +207,10 @@ class MainWindow:
     def detect_circle(self):
         if self.cv_img is None:
             return
-        region = self.canvas.get_selected_region()
-        if region is None:
-            messagebox.showinfo("Info", "Please select a region first.")
-            return
+        # Use the entire image as the region
+        img_h, img_w = self.cv_img.shape[:2]
+        region = (0, 0, img_w, img_h)
+        print(f"Selected region (pixels): x={region[0]}, y={region[1]}, w={region[2]}, h={region[3]}")
         temp_input = "_temp_input.jpg"
         temp_output = "_temp_output.jpg"
         cv2.imwrite(temp_input, self.cv_img)
