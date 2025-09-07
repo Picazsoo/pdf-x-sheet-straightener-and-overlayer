@@ -1,4 +1,4 @@
-import sys
+import os
 import tkinter as tk
 from tkinter import filedialog
 
@@ -245,61 +245,62 @@ def overlay_text_fields(pil_img, coords, counter_start):
 
 def process_pdf(input_pdf, output_pdf):
     try:
-        # Convert PDF to images
         pages = convert_from_path(input_pdf)
     except Exception as e:
-        print("Error: Unable to convert PDF to images. Make sure Poppler is installed and in your PATH.")
-        print("See: https://github.com/oschwartz10612/poppler-windows or install poppler-utils via your package manager. E.g. winget install --id=oschwartz10612.Poppler  -e. You might need to create system variable POPPLER_PATH pointing to the bin folder inside the poppler folder.")
-        print(f"Original error: {e}")
-        sys.exit(1)
+        print(f"Error: Unable to convert {input_pdf} to images.")
+        return False
     processed_images = []
-    target_size = (3918, 2479)  # width, height
-    counter = 1  # Start counter for the document
+    target_size = (3918, 2479)
+    counter = 1
     for idx, page in enumerate(pages):
+        print(f"Processing file: {input_pdf} | Page: {idx+1}/{len(pages)}")
         img = ensure_landscape(page)
         img = img.resize(target_size, Image.LANCZOS)
-        # --- Find and transform based on reference points ---
         points = find_reference_points(img)
+        black_count = sum(1 for p in points if p[2] == "BLACK")
+        white_count = sum(1 for p in points if p[2] == "WHITE")
+        if not ((black_count == 3 and white_count == 0) or (black_count == 2 and white_count == 1)):
+            print(f"  [FAIL] Detection failed on file: {input_pdf}, page: {idx+1} (found {black_count} BLACK, {white_count} WHITE)")
+            return False
+        print(f"  [OK] Detection success on file: {input_pdf}, page: {idx+1} (found {black_count} BLACK, {white_count} WHITE)")
         img = transform_image_by_points(img, points)
-        # --- Highlight after transformation ---
         img = detect_and_highlight_circle_pil(img)
-        # --- Determine page type and overlay text ---
         page_type = get_page_type(points)
-        if page_type == 'PAGE_TYPE_50':
-            coords = PAGE_TYPE_50_COORDS
-        else:
-            coords = PAGE_TYPE_100_COORDS
+        coords = PAGE_TYPE_50_COORDS if page_type == 'PAGE_TYPE_50' else PAGE_TYPE_100_COORDS
         img, counter = overlay_text_fields(img, coords, counter)
         processed_images.append(img)
-
-    # Save images as PDF
     processed_images[0].save(
         output_pdf,
         save_all=True,
         append_images=processed_images[1:],
         resolution=200
     )
+    return True
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    pdf_files = filedialog.askopenfilenames(
+        title="Select PDF files to process",
+        filetypes=[("PDF Files", "*.pdf")]
+    )
+    if not pdf_files:
+        print("No files selected.")
+        return
+    output_folder = filedialog.askdirectory(title="Select output folder")
+    if not output_folder:
+        print("No output folder selected.")
+        return
+    for pdf_path in pdf_files:
+        base = os.path.basename(pdf_path)
+        name, ext = os.path.splitext(base)
+        output_pdf = os.path.join(output_folder, f"{name}_processed{ext}")
+        print(f"Starting processing: {pdf_path}")
+        success = process_pdf(pdf_path, output_pdf)
+        if success:
+            print(f"[SUCCESS] Saved: {output_pdf}")
+        else:
+            print(f"[SKIPPED] {pdf_path}")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-
-    input_pdf = filedialog.askopenfilename(
-        title="Select input PDF",
-        filetypes=[("PDF files", "*.pdf")]
-    )
-    if not input_pdf:
-        print("No input PDF selected.")
-        sys.exit(1)
-
-    output_pdf = filedialog.asksaveasfilename(
-        title="Save output PDF as",
-        defaultextension=".pdf",
-        filetypes=[("PDF files", "*.pdf")]
-    )
-    if not output_pdf:
-        print("No output PDF selected.")
-        sys.exit(1)
-
-    process_pdf(input_pdf, output_pdf)
-    print(f"Processed PDF saved to {output_pdf}")
+    main()
