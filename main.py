@@ -9,24 +9,21 @@ from reportlab.lib.pagesizes import landscape, portrait
 import tkinter as tk
 from tkinter import filedialog
 
-def detect_and_highlight_circle_pil(pil_img):
+def find_reference_points(pil_img):
     """
-    Detects up to three black dots (blue highlight). If only two are found,
-    also tries to find a white dot with a black circle around it (red highlight).
-    Returns a new PIL image.
+    Finds up to three black dots. If only two, tries to find a white dot with black circle.
+    Returns a list of (x, y) tuples for the detected points.
     """
-    # Convert PIL image to OpenCV format
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    # Threshold to find black dots
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    black_circles = []
+    points = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < 400 or area > 1100:
-            continue  # Filter by area (approximate for radius 14-18)
+            continue
         (x, y), radius = cv2.minEnclosingCircle(cnt)
         if radius < 12 or radius > 18:
             continue
@@ -35,19 +32,11 @@ def detect_and_highlight_circle_pil(pil_img):
             continue
         circularity = 4 * np.pi * (area / (perimeter * perimeter))
         if circularity > 0.7:
-            black_circles.append((int(x), int(y), int(radius), circularity, area))
+            points.append((int(x), int(y)))
 
-    # Sort by circularity, keep up to 3
-    black_circles = sorted(black_circles, key=lambda x: -x[3])[:3]
-    # Draw black dots in blue
-    for x, y, r, _, _ in black_circles:
-        cv2.circle(cv_img, (x, y), r, (255, 0, 0), 3)  # Blue
-
-    # If only two black dots found, try to find a white dot with black circle
-    if len(black_circles) == 2:
-        # Use HoughCircles to find concentric circles (white inside black)
+    # If only two black dots, try to find a white dot with black circle
+    if len(points) == 2:
         gray_blur = cv2.medianBlur(gray, 5)
-        # Inner (white) circle
         inner_circles = cv2.HoughCircles(
             gray_blur,
             cv2.HOUGH_GRADIENT,
@@ -58,7 +47,6 @@ def detect_and_highlight_circle_pil(pil_img):
             minRadius=14,
             maxRadius=18
         )
-        # Outer (black) circle
         outer_circles = cv2.HoughCircles(
             gray_blur,
             cv2.HOUGH_GRADIENT,
@@ -74,13 +62,122 @@ def detect_and_highlight_circle_pil(pil_img):
             outer_circles = np.uint16(np.around(outer_circles[0]))
             for icx, icy, ir in inner_circles:
                 for ocx, ocy, orad in outer_circles:
-                    if abs(icx - ocx) < 5 and abs(icy - ocy) < 5:
-                        # Draw both circles in red
-                        cv2.circle(cv_img, (ocx, ocy), orad, (0, 0, 255), 3)
-                        cv2.circle(cv_img, (icx, icy), ir, (0, 0, 255), 3)
+                    # Cast to int to avoid overflow in subtraction
+                    if abs(int(icx) - int(ocx)) < 5 and abs(int(icy) - int(ocy)) < 5:
+                        points.append((int(icx), int(icy)))
+                        break
+    return points
+
+def transform_image_by_points(pil_img, points):
+    """
+    Transforms the image so that the leftmost point is at (284, 2194) and the rightmost at (3284, 2194).
+    Only rotates and scales horizontally (no vertical scaling).
+    """
+    if len(points) < 2:
+        return pil_img  # Not enough points to transform
+
+    # Find leftmost and rightmost points
+    pts = sorted(points, key=lambda p: p[0])
+    left = np.array(pts[0], dtype=np.float32)
+    right = np.array(pts[-1], dtype=np.float32)
+
+    # Target positions
+    target_left = np.array([284, 2194], dtype=np.float32)
+    target_right = np.array([3284, 2194], dtype=np.float32)
+
+    # Compute angle and scale
+    vec_src = right - left
+    vec_dst = target_right - target_left
+    angle_src = np.arctan2(vec_src[1], vec_src[0])
+    angle_dst = np.arctan2(vec_dst[1], vec_dst[0])
+    angle = np.degrees(angle_dst - angle_src)
+    scale = np.linalg.norm(vec_dst) / np.linalg.norm(vec_src)
+
+    # Build transformation matrix
+    # 1. Translate left to origin
+    # 2. Rotate by angle
+    # 3. Scale horizontally
+    # 4. Translate to target_left
+    M_translate1 = np.array([[1, 0, -left[0]], [0, 1, -left[1]], [0, 0, 1]], dtype=np.float32)
+    theta = angle_dst - angle_src
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    M_rotate = np.array([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], dtype=np.float32)
+    M_scale = np.array([[scale, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+    M_translate2 = np.array([[1, 0, target_left[0]], [0, 1, target_left[1]], [0, 0, 1]], dtype=np.float32)
+
+    # Combine transformations: T2 * S * R * T1
+    M = M_translate2 @ M_scale @ M_rotate @ M_translate1
+    M_affine = M[:2, :]
+
+    cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    h, w = cv_img.shape[:2]
+    transformed = cv2.warpAffine(cv_img, M_affine, (w, h), flags=cv2.INTER_LINEAR, borderValue=(255,255,255))
+    return Image.fromarray(cv2.cvtColor(transformed, cv2.COLOR_BGR2RGB))
+
+def detect_and_highlight_circle_pil(pil_img):
+    """
+    Detects up to three black dots (blue highlight). If only two are found,
+    also tries to find a white dot with black circle around it (red highlight).
+    Returns a new PIL image.
+    """
+    # ...existing code for detection, but highlight after transformation...
+    cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    black_circles = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 400 or area > 1100:
+            continue
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+        if radius < 12 or radius > 18:
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * np.pi * (area / (perimeter * perimeter))
+        if circularity > 0.7:
+            black_circles.append((int(x), int(y), int(radius), circularity, area))
+
+    black_circles = sorted(black_circles, key=lambda x: -x[3])[:3]
+    for x, y, r, _, _ in black_circles:
+        cv2.circle(cv_img, (x, y), r, (255, 0, 0), 3)  # Blue
+
+    if len(black_circles) == 2:
+        gray_blur = cv2.medianBlur(gray, 5)
+        inner_circles = cv2.HoughCircles(
+            gray_blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=20,
+            param1=100,
+            param2=30,
+            minRadius=14,
+            maxRadius=18
+        )
+        outer_circles = cv2.HoughCircles(
+            gray_blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=20,
+            param1=100,
+            param2=30,
+            minRadius=30,
+            maxRadius=35
+        )
+        if inner_circles is not None and outer_circles is not None:
+            inner_circles = np.uint16(np.around(inner_circles[0]))
+            outer_circles = np.uint16(np.around(outer_circles[0]))
+            for icx, icy, ir in inner_circles:
+                for ocx, ocy, orad in outer_circles:
+                    # Cast to int to avoid overflow in subtraction
+                    if abs(int(icx) - int(ocx)) < 5 and abs(int(icy) - int(ocy)) < 5:
+                        cv2.circle(cv_img, (int(ocx), int(ocy)), int(orad), (0, 0, 255), 3)
+                        cv2.circle(cv_img, (int(icx), int(icy)), int(ir), (0, 0, 255), 3)
                         break
 
-    # Convert back to PIL
     result_pil = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
     return result_pil
 
@@ -106,6 +203,10 @@ def process_pdf(input_pdf, output_pdf):
     for idx, page in enumerate(pages):
         img = ensure_landscape(page)
         img = img.resize(target_size, Image.LANCZOS)
+        # --- Find and transform based on reference points ---
+        points = find_reference_points(img)
+        img = transform_image_by_points(img, points)
+        # --- Highlight after transformation ---
         img = detect_and_highlight_circle_pil(img)
         processed_images.append(img)
 
