@@ -1,113 +1,212 @@
 import cv2
 import numpy as np
+import sys
+import os
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
 
-# --- File picker for images ---
-root = tk.Tk()
-root.withdraw()  # Hide main window
+def detect_and_highlight_circle(image_path, region, output_path):
+    """
+    Detects a white inner circle (~33px ±4px) in a given region of an image.
+    If found, highlights it in red.
 
-clean_path = filedialog.askopenfilename(
-    title="Select CLEAN template image",
-    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff")]
-)
-scan_path = filedialog.askopenfilename(
-    title="Select SCAN image",
-    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff")]
-)
+    :param image_path: Path to input image
+    :param region: (x, y, w, h) specifying the region of interest
+    :param output_path: Path to save output image
+    :return: True if circle found, False otherwise
+    """
 
-if not clean_path or not scan_path:
-    print("❌ No file selected. Exiting.")
-    exit(1)
+    # Load image
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError("Image not found or could not be loaded.")
 
-clean = cv2.imread(clean_path, cv2.IMREAD_GRAYSCALE)
-scan = cv2.imread(scan_path, cv2.IMREAD_GRAYSCALE)
+    x, y, w, h = region
+    roi = image[y:y+h, x:x+w]
 
-# --- GUI for parameter tuning ---
-def run_matching(num_features, ransac_thresh, num_matches):
-    orb = cv2.ORB_create(num_features)
-    kp1, des1 = orb.detectAndCompute(clean, None)
-    kp2, des2 = orb.detectAndCompute(scan, None)
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    if des1 is None or des2 is None:
-        return None, None, None, None
-    matches = bf.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
-    match_vis = cv2.drawMatches(clean, kp1, scan, kp2, matches[:num_matches], None, flags=2)
-    if len(matches) > 10:
-        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1,1,2)
-        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1,1,2)
-        H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, ransac_thresh)
-        if H is not None:
-            h, w = clean.shape
-            aligned = cv2.warpPerspective(scan, H, (w, h))
-            overlay = cv2.addWeighted(clean, 0.5, aligned, 0.5, 0)
-            return match_vis, aligned, overlay, H
-    return match_vis, None, None, None
+    # Convert to grayscale
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 5)
 
-def update(*args):
-    num_features = feature_slider.get()
-    ransac_thresh = ransac_slider.get()
-    num_matches = matches_slider.get()
-    match_vis, aligned, overlay, H = run_matching(num_features, ransac_thresh, num_matches)
-    if match_vis is not None:
-        cv2.imshow("Matches", match_vis)
-    if overlay is not None:
-        cv2.imshow("Overlay (Clean + Aligned Scan)", overlay)
-    else:
-        cv2.destroyWindow("Overlay (Clean + Aligned Scan)")
-    if aligned is not None:
-        cv2.imshow("Aligned Scan", aligned)
-    else:
-        cv2.destroyWindow("Aligned Scan")
+    found = False
 
-# --- Tkinter window for sliders ---
-gui = tk.Tk()
-gui.title("Fahrplan Matcher Parameters")
+    # Detect circles using Hough transform (inner white circle)
+    circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=20,
+        param1=100,
+        param2=30,
+        minRadius=28,
+        maxRadius=36
+    )
 
-tk.Label(gui, text="ORB Features").pack()
-feature_slider = tk.Scale(gui, from_=500, to=10000, orient=tk.HORIZONTAL, resolution=100, command=update)
-feature_slider.set(5000)
-feature_slider.pack(fill=tk.X)
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        for cx, cy, r in circles[0, :]:
+            # Draw red highlight on the original image (adjusted for region offset)
+            cv2.circle(image, (x+cx, y+cy), r, (0, 0, 255), 3)
+            found = True
 
-tk.Label(gui, text="RANSAC Threshold").pack()
-ransac_slider = tk.Scale(gui, from_=1, to=20, orient=tk.HORIZONTAL, resolution=1, command=update)
-ransac_slider.set(5)
-ransac_slider.pack(fill=tk.X)
+    cv2.imwrite(output_path, image)
+    return found
 
-tk.Label(gui, text="Number of Matches to Draw").pack()
-matches_slider = tk.Scale(gui, from_=10, to=200, orient=tk.HORIZONTAL, resolution=1, command=update)
-matches_slider.set(50)
-matches_slider.pack(fill=tk.X)
 
-def save_results():
-    num_features = feature_slider.get()
-    ransac_thresh = ransac_slider.get()
-    num_matches = matches_slider.get()
-    match_vis, aligned, overlay, H = run_matching(num_features, ransac_thresh, num_matches)
-    if aligned is not None:
-        aligned_save_path = filedialog.asksaveasfilename(
-            title="Save aligned scan as...",
-            defaultextension=".jpg",
-            filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png"), ("All files", "*.*")]
+class ImageCanvas(tk.Canvas):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.image = None
+        self.photo = None
+        self.img_id = None
+        self.start_x = self.start_y = None
+        self.rect_id = None
+        self.region = None
+        self.display_scale = 1.0
+        self.bind("<ButtonPress-1>", self.on_press)
+        self.bind("<B1-Motion>", self.on_drag)
+        self.bind("<ButtonRelease-1>", self.on_release)
+
+    def set_image(self, cv_img):
+        self.cv_img = cv_img
+        img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        h, w = img.shape[:2]
+        max_w, max_h = 800, 600
+        scale = min(max_w / w, max_h / h, 1.0)
+        self.display_scale = scale
+        disp_img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        self.image = Image.fromarray(disp_img)
+        self.photo = ImageTk.PhotoImage(self.image)
+        self.config(width=self.photo.width(), height=self.photo.height())
+        self.delete("all")
+        self.img_id = self.create_image(0, 0, anchor="nw", image=self.photo)
+        self.region = None
+        self.rect_id = None
+
+    def on_press(self, event):
+        if self.image is None:
+            return
+        self.start_x = event.x
+        self.start_y = event.y
+        if self.rect_id:
+            self.delete(self.rect_id)
+            self.rect_id = None
+
+    def on_drag(self, event):
+        if self.image is None or self.start_x is None or self.start_y is None:
+            return
+        if self.rect_id:
+            self.delete(self.rect_id)
+        self.rect_id = self.create_rectangle(
+            self.start_x, self.start_y, event.x, event.y,
+            outline="red", width=2, dash=(4, 2)
         )
-        if aligned_save_path:
-            cv2.imwrite(aligned_save_path, aligned)
-            print(f"✅ Alignment done. Saved as '{aligned_save_path}'.")
-    if match_vis is not None:
-        matches_save_path = filedialog.asksaveasfilename(
-            title="Save debug matches image as...",
-            defaultextension=".jpg",
-            filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png"), ("All files", "*.*")]
+
+    def on_release(self, event):
+        if self.image is None or self.start_x is None or self.start_y is None:
+            return
+        x1, y1 = self.start_x, self.start_y
+        x2, y2 = event.x, event.y
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
+        self.region = (x1, y1, x2, y2)
+        self.start_x = self.start_y = None
+
+        # Log the selected region in pixels
+        region_px = self.get_selected_region()
+        if region_px:
+            print(f"Selected region (pixels): x={region_px[0]}, y={region_px[1]}, w={region_px[2]}, h={region_px[3]}")
+
+    def get_selected_region(self):
+        if self.region is None or self.cv_img is None:
+            return None
+        x1, y1, x2, y2 = self.region
+        scale = self.display_scale
+        ix1 = int(x1 / scale)
+        iy1 = int(y1 / scale)
+        ix2 = int(x2 / scale)
+        iy2 = int(y2 / scale)
+        x = min(ix1, ix2)
+        y = min(iy1, iy2)
+        w = abs(ix2 - ix1)
+        h = abs(iy2 - iy1)
+        if w == 0 or h == 0:
+            return None
+        # Clamp to image size
+        img_h, img_w = self.cv_img.shape[:2]
+        x = max(0, min(x, img_w - 1))
+        y = max(0, min(y, img_h - 1))
+        w = min(w, img_w - x)
+        h = min(h, img_h - y)
+        return (x, y, w, h)
+
+class MainWindow:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Circle Detector")
+        self.image_path = None
+        self.cv_img = None
+        self.result_img = None
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(fill="x", padx=5, pady=5)
+
+        load_btn = tk.Button(btn_frame, text="Load Image", command=self.load_image)
+        load_btn.pack(side="left", padx=2)
+
+        detect_btn = tk.Button(btn_frame, text="Detect Circle", command=self.detect_circle)
+        detect_btn.pack(side="left", padx=2)
+
+        save_btn = tk.Button(btn_frame, text="Save Result", command=self.save_result)
+        save_btn.pack(side="left", padx=2)
+
+        self.canvas = ImageCanvas(root, bg="gray")
+        self.canvas.pack(fill="both", expand=True, padx=5, pady=5)
+
+    def load_image(self):
+        fname = filedialog.askopenfilename(
+            title="Open Image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")]
         )
-        if matches_save_path:
-            cv2.imwrite(matches_save_path, match_vis)
-            print(f"Debug matches saved as '{matches_save_path}'.")
+        if fname:
+            img = cv2.imread(fname)
+            if img is not None:
+                self.image_path = fname
+                self.cv_img = img
+                self.result_img = img.copy()
+                self.canvas.set_image(self.result_img)
 
-save_btn = tk.Button(gui, text="Save Results", command=save_results)
-save_btn.pack(pady=10)
+    def save_result(self):
+        if self.result_img is None:
+            return
+        fname = filedialog.asksaveasfilename(
+            title="Save Image",
+            defaultextension=".png",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")]
+        )
+        if fname:
+            cv2.imwrite(fname, self.result_img)
 
-# Initial update and mainloop
-update()
-gui.mainloop()
-cv2.destroyAllWindows()
+    def detect_circle(self):
+        if self.cv_img is None:
+            return
+        region = self.canvas.get_selected_region()
+        if region is None:
+            messagebox.showinfo("Info", "Please select a region first.")
+            return
+        temp_input = "_temp_input.jpg"
+        temp_output = "_temp_output.jpg"
+        cv2.imwrite(temp_input, self.cv_img)
+        found = detect_and_highlight_circle(temp_input, region, temp_output)
+        self.result_img = cv2.imread(temp_output)
+        self.canvas.set_image(self.result_img)
+        if found:
+            messagebox.showinfo("Result", "Circle found and highlighted.")
+        else:
+            messagebox.showinfo("Result", "No matching circle found.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MainWindow(root)
+    root.mainloop()
