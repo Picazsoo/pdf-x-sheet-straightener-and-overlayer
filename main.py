@@ -7,29 +7,57 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from pdf2image import convert_from_path
 
-PAGE_TYPE_50_COORDS = [
-    [384, 132, 9],
-    [1364, 132, 10],
-    [2453, 132, 6],
-    [384, 2200, 9],
-    [1364, 2200, 10],
-    [2453, 2200, 6],
+IMAGE_HEIGHT = 2479
+
+IMAGE_WIDTH = 3918
+
+BLACK_MAX_RADIUS = 18
+BLACK_MIN_RADIUS = 12
+BLACK_MIN_AREA = int(np.floor(np.pi * BLACK_MIN_RADIUS ** 2 / 100) * 100)
+BLACK_MAX_AREA = int(np.floor(np.pi * BLACK_MAX_RADIUS ** 2 / 100) * 100) + 100
+print(f"BLACK_MIN_AREA: {BLACK_MIN_AREA}, BLACK_MAX_AREA: {BLACK_MAX_AREA}")
+
+OUTER_BLACK_MAX_RADIUS = 35
+OUTER_BLACK_MIN_RADIUS = 30
+INNER_WHITE_MAX_RADIUS = 18
+INNER_WHITE_MIN_RADIUS = 14
+
+COLUMN_1 = 384
+COLUMN_2 = 1364
+COLUMN_3 = 2453
+
+PT_50_ROW_1 = 132
+PT_50_ROW_2 = 2200
+
+PT_100_ROW_1 = 155
+PT_100_ROW_2 = 645
+PT_100_ROW_3 = 1163
+PT_100_ROW_4 = 1680
+
+PAGE_TYPE_50_COORDS_WITH_INCREMENTS = [
+    [COLUMN_1, PT_50_ROW_1, 9],
+    [COLUMN_2, PT_50_ROW_1, 10],
+    [COLUMN_3, PT_50_ROW_1, 6],
+    [COLUMN_1, PT_50_ROW_2, 9],
+    [COLUMN_2, PT_50_ROW_2, 10],
+    [COLUMN_3, PT_50_ROW_2, 6],
 ]
 
-PAGE_TYPE_100_COORDS = [
-    [384, 155, 9],
-    [1364, 155, 10],
-    [2453, 155, 6],
-    [384, 645, 9],
-    [1364, 645, 10],
-    [2453, 645, 6],
-    [384, 1163, 9],
-    [1364, 1163, 10],
-    [2453, 1163, 6],
-    [384, 1680, 9],
-    [1364, 1680, 10],
-    [2453, 1680, 6],
+PAGE_TYPE_100_COORDS_WITH_INCREMENTS = [
+    [COLUMN_1, PT_100_ROW_1, 9],
+    [COLUMN_2, PT_100_ROW_1, 10],
+    [COLUMN_3, PT_100_ROW_1, 6],
+    [COLUMN_1, PT_100_ROW_2, 9],
+    [COLUMN_2, PT_100_ROW_2, 10],
+    [COLUMN_3, PT_100_ROW_2, 6],
+    [COLUMN_1, PT_100_ROW_3, 9],
+    [COLUMN_2, PT_100_ROW_3, 10],
+    [COLUMN_3, PT_100_ROW_3, 6],
+    [COLUMN_1, PT_100_ROW_4, 9],
+    [COLUMN_2, PT_100_ROW_4, 10],
+    [COLUMN_3, PT_100_ROW_4, 6],
 ]
+
 
 def find_reference_points(pil_img):
     """
@@ -44,10 +72,10 @@ def find_reference_points(pil_img):
     points = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 400 or area > 1100:
+        if area < BLACK_MIN_AREA or area > BLACK_MAX_AREA:
             continue
         (x, y), radius = cv2.minEnclosingCircle(cnt)
-        if radius < 12 or radius > 18:
+        if radius < BLACK_MIN_RADIUS or radius > BLACK_MAX_RADIUS:
             continue
         perimeter = cv2.arcLength(cnt, True)
         if perimeter == 0:
@@ -88,6 +116,7 @@ def find_reference_points(pil_img):
                         points.append((int(icx), int(icy), "WHITE"))
                         break
     return points
+
 
 def transform_image_by_points(pil_img, points):
     """
@@ -132,8 +161,9 @@ def transform_image_by_points(pil_img, points):
 
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     h, w = cv_img.shape[:2]
-    transformed = cv2.warpAffine(cv_img, M_affine, (w, h), flags=cv2.INTER_LINEAR, borderValue=(255,255,255))
+    transformed = cv2.warpAffine(cv_img, M_affine, (w, h), flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
     return Image.fromarray(cv2.cvtColor(transformed, cv2.COLOR_BGR2RGB))
+
 
 def detect_and_highlight_circle_pil(pil_img):
     """
@@ -150,10 +180,10 @@ def detect_and_highlight_circle_pil(pil_img):
     black_circles = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 400 or area > 1100:
+        if area < BLACK_MIN_AREA or area > BLACK_MAX_AREA:
             continue
         (x, y), radius = cv2.minEnclosingCircle(cnt)
-        if radius < 12 or radius > 18:
+        if radius < BLACK_MIN_RADIUS or radius > BLACK_MAX_RADIUS:
             continue
         perimeter = cv2.arcLength(cnt, True)
         if perimeter == 0:
@@ -175,8 +205,8 @@ def detect_and_highlight_circle_pil(pil_img):
             minDist=20,
             param1=100,
             param2=30,
-            minRadius=14,
-            maxRadius=18
+            minRadius=INNER_WHITE_MIN_RADIUS,
+            maxRadius=INNER_WHITE_MAX_RADIUS
         )
         outer_circles = cv2.HoughCircles(
             gray_blur,
@@ -185,8 +215,8 @@ def detect_and_highlight_circle_pil(pil_img):
             minDist=20,
             param1=100,
             param2=30,
-            minRadius=30,
-            maxRadius=35
+            minRadius=OUTER_BLACK_MIN_RADIUS,
+            maxRadius=OUTER_BLACK_MAX_RADIUS
         )
         if inner_circles is not None and outer_circles is not None:
             inner_circles = np.uint16(np.around(inner_circles[0]))
@@ -202,6 +232,7 @@ def detect_and_highlight_circle_pil(pil_img):
     result_pil = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
     return result_pil
 
+
 def ensure_landscape(pil_img):
     """
     Rotates the image counter-clockwise if it's not in landscape orientation.
@@ -209,6 +240,7 @@ def ensure_landscape(pil_img):
     if pil_img.width < pil_img.height:
         return pil_img.rotate(90, expand=True)
     return pil_img
+
 
 def get_page_type(points):
     """
@@ -225,6 +257,7 @@ def get_page_type(points):
     # Fallback: treat as PAGE_TYPE_50
     return 'PAGE_TYPE_50'
 
+
 def overlay_text_fields(pil_img, coords, counter_start):
     """
     Draws text at given coords on pil_img, incrementing counter by step for each.
@@ -235,13 +268,14 @@ def overlay_text_fields(pil_img, coords, counter_start):
     # Try to use a monospaced font, fallback to default
     try:
         font = ImageFont.truetype("arial.ttf", 48)
-    except:
+    except (OSError, ValueError):
         font = ImageFont.load_default()
     counter = counter_start
     for x, y, step in coords:
         draw.text((x, y), str(counter), fill=(0, 0, 0), font=font)
         counter += step
     return img, counter
+
 
 def process_pdf(input_pdf, output_pdf):
     try:
@@ -250,23 +284,25 @@ def process_pdf(input_pdf, output_pdf):
         print(f"Error: Unable to convert {input_pdf} to images.")
         return False
     processed_images = []
-    target_size = (3918, 2479)
+    target_size = (IMAGE_WIDTH, IMAGE_HEIGHT)
     counter = 1
     for idx, page in enumerate(pages):
-        print(f"Processing file: {input_pdf} | Page: {idx+1}/{len(pages)}")
+        print(f"Processing file: {input_pdf} | Page: {idx + 1}/{len(pages)}")
         img = ensure_landscape(page)
-        img = img.resize(target_size, Image.LANCZOS)
+        img = img.resize(target_size, Image.Resampling.LANCZOS)
         points = find_reference_points(img)
         black_count = sum(1 for p in points if p[2] == "BLACK")
         white_count = sum(1 for p in points if p[2] == "WHITE")
         if not ((black_count == 3 and white_count == 0) or (black_count == 2 and white_count == 1)):
-            print(f"  [FAIL] Detection failed on file: {input_pdf}, page: {idx+1} (found {black_count} BLACK, {white_count} WHITE)")
+            print(
+                f"  [FAIL] Detection failed on file: {input_pdf}, page: {idx + 1} (found {black_count} BLACK, {white_count} WHITE)")
             return False
-        print(f"  [OK] Detection success on file: {input_pdf}, page: {idx+1} (found {black_count} BLACK, {white_count} WHITE)")
+        print(
+            f"  [OK] Detection success on file: {input_pdf}, page: {idx + 1} (found {black_count} BLACK, {white_count} WHITE)")
         img = transform_image_by_points(img, points)
         img = detect_and_highlight_circle_pil(img)
         page_type = get_page_type(points)
-        coords = PAGE_TYPE_50_COORDS if page_type == 'PAGE_TYPE_50' else PAGE_TYPE_100_COORDS
+        coords = PAGE_TYPE_50_COORDS_WITH_INCREMENTS if page_type == 'PAGE_TYPE_50' else PAGE_TYPE_100_COORDS_WITH_INCREMENTS
         img, counter = overlay_text_fields(img, coords, counter)
         processed_images.append(img)
     processed_images[0].save(
@@ -276,6 +312,7 @@ def process_pdf(input_pdf, output_pdf):
         resolution=200
     )
     return True
+
 
 def main():
     root = tk.Tk()
@@ -301,6 +338,7 @@ def main():
             print(f"[SUCCESS] Saved: {output_pdf}")
         else:
             print(f"[SKIPPED] {pdf_path}")
+
 
 if __name__ == "__main__":
     main()
