@@ -2,34 +2,24 @@ import cv2
 import numpy as np
 import sys
 import os
+from pdf2image import convert_from_path
+from PIL import Image
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import landscape, portrait
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from PIL import Image, ImageTk
+from tkinter import filedialog
 
-def detect_and_highlight_circle(image_path, region, output_path):
+def detect_and_highlight_circle_pil(pil_img):
     """
-    Detects a black circle (~65px ±4px) with a white inner circle (~33px ±4px)
-    in a given region of an image. If found, highlights both in red.
-
-    :param image_path: Path to input image
-    :param region: (x, y, w, h) specifying the region of interest
-    :param output_path: Path to save output image
-    :return: True if circle pair found, False otherwise
+    Detects concentric circles in a PIL image, highlights them, and returns a new PIL image.
     """
-
-    # Load image
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError("Image not found or could not be loaded.")
-
-    x, y, w, h = region
-    roi = image[y:y+h, x:x+w]
-
+    # Convert PIL image to OpenCV format
+    cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    h, w = cv_img.shape[:2]
+    region = (0, 0, w, h)
     # Convert to grayscale
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     gray = cv2.medianBlur(gray, 5)
-
-    found = False
 
     # Detect small (inner) circles (white)
     inner_circles = cv2.HoughCircles(
@@ -55,174 +45,73 @@ def detect_and_highlight_circle(image_path, region, output_path):
         maxRadius=35
     )
 
+    found = False
     if inner_circles is not None and outer_circles is not None:
         inner_circles = np.uint16(np.around(inner_circles[0]))
         outer_circles = np.uint16(np.around(outer_circles[0]))
-        # Find pairs of circles with close centers
         for icx, icy, ir in inner_circles:
             for ocx, ocy, orad in outer_circles:
                 if abs(icx - ocx) < 5 and abs(icy - ocy) < 5:
-                    # Draw both circles in red on the original image (adjusted for region offset)
-                    cv2.circle(image, (x+ocx, y+ocy), orad, (0, 0, 255), 3)
-                    cv2.circle(image, (x+icx, y+icy), ir, (0, 0, 255), 3)
+                    cv2.circle(cv_img, (ocx, ocy), orad, (0, 0, 255), 3)
+                    cv2.circle(cv_img, (icx, icy), ir, (0, 0, 255), 3)
                     found = True
-    # Always save the output image, even if not found
-    cv2.imwrite(output_path, image)
-    return found
+    # Convert back to PIL
+    result_pil = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+    return result_pil
 
-class ImageCanvas(tk.Canvas):
-    def __init__(self, master, **kwargs):
-        super().__init__(master, **kwargs)
-        self.image = None
-        self.photo = None
-        self.img_id = None
-        self.start_x = self.start_y = None
-        self.rect_id = None
-        self.region = None
-        self.display_scale = 1.0
-        self.bind("<ButtonPress-1>", self.on_press)
-        self.bind("<B1-Motion>", self.on_drag)
-        self.bind("<ButtonRelease-1>", self.on_release)
+def ensure_landscape(pil_img):
+    """
+    Rotates the image counter-clockwise if it's not in landscape orientation.
+    """
+    if pil_img.width < pil_img.height:
+        return pil_img.rotate(90, expand=True)
+    return pil_img
 
-    def set_image(self, cv_img):
-        self.cv_img = cv_img
-        img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-        h, w = img.shape[:2]
-        max_w, max_h = 800, 600
-        scale = min(max_w / w, max_h / h, 1.0)
-        self.display_scale = scale
-        disp_img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-        self.image = Image.fromarray(disp_img)
-        self.photo = ImageTk.PhotoImage(self.image)
-        self.config(width=self.photo.width(), height=self.photo.height())
-        self.delete("all")
-        self.img_id = self.create_image(0, 0, anchor="nw", image=self.photo)
-        self.region = None
-        self.rect_id = None
+def process_pdf(input_pdf, output_pdf):
+    try:
+        # Convert PDF to images
+        pages = convert_from_path(input_pdf)
+    except Exception as e:
+        print("Error: Unable to convert PDF to images. Make sure Poppler is installed and in your PATH.")
+        print("See: https://github.com/oschwartz10612/poppler-windows or install poppler-utils via your package manager.")
+        print(f"Original error: {e}")
+        sys.exit(1)
+    processed_images = []
+    target_size = (3918, 2479)  # width, height
+    for idx, page in enumerate(pages):
+        img = ensure_landscape(page)
+        img = img.resize(target_size, Image.LANCZOS)
+        img = detect_and_highlight_circle_pil(img)
+        processed_images.append(img)
 
-    def on_press(self, event):
-        if self.image is None:
-            return
-        self.start_x = event.x
-        self.start_y = event.y
-        if self.rect_id:
-            self.delete(self.rect_id)
-            self.rect_id = None
-
-    def on_drag(self, event):
-        if self.image is None or self.start_x is None or self.start_y is None:
-            return
-        if self.rect_id:
-            self.delete(self.rect_id)
-        self.rect_id = self.create_rectangle(
-            self.start_x, self.start_y, event.x, event.y,
-            outline="red", width=2, dash=(4, 2)
-        )
-
-    def on_release(self, event):
-        if self.image is None or self.start_x is None or self.start_y is None:
-            return
-        x1, y1 = self.start_x, self.start_y
-        x2, y2 = event.x, event.y
-        x1, x2 = sorted((x1, x2))
-        y1, y2 = sorted((y1, y2))
-        self.region = (x1, y1, x2, y2)
-        self.start_x = self.start_y = None
-
-        # Log the selected region in pixels
-        region_px = self.get_selected_region()
-        if region_px:
-            print(f"Selected region (pixels): x={region_px[0]}, y={region_px[1]}, w={region_px[2]}, h={region_px[3]}")
-
-    def get_selected_region(self):
-        if self.region is None or self.cv_img is None:
-            return None
-        x1, y1, x2, y2 = self.region
-        scale = self.display_scale
-        ix1 = int(x1 / scale)
-        iy1 = int(y1 / scale)
-        ix2 = int(x2 / scale)
-        iy2 = int(y2 / scale)
-        x = min(ix1, ix2)
-        y = min(iy1, iy2)
-        w = abs(ix2 - ix1)
-        h = abs(iy2 - iy1)
-        if w == 0 or h == 0:
-            return None
-        # Clamp to image size
-        img_h, img_w = self.cv_img.shape[:2]
-        x = max(0, min(x, img_w - 1))
-        y = max(0, min(y, img_h - 1))
-        w = min(w, img_w - x)
-        h = min(h, img_h - y)
-        return (x, y, w, h)
-
-class MainWindow:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Circle Detector")
-        self.image_path = None
-        self.cv_img = None
-        self.result_img = None
-
-        btn_frame = tk.Frame(root)
-        btn_frame.pack(fill="x", padx=5, pady=5)
-
-        load_btn = tk.Button(btn_frame, text="Load Image", command=self.load_image)
-        load_btn.pack(side="left", padx=2)
-
-        detect_btn = tk.Button(btn_frame, text="Detect Circle", command=self.detect_circle)
-        detect_btn.pack(side="left", padx=2)
-
-        save_btn = tk.Button(btn_frame, text="Save Result", command=self.save_result)
-        save_btn.pack(side="left", padx=2)
-
-        self.canvas = ImageCanvas(root, bg="gray")
-        self.canvas.pack(fill="both", expand=True, padx=5, pady=5)
-
-    def load_image(self):
-        fname = filedialog.askopenfilename(
-            title="Open Image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")]
-        )
-        if fname:
-            img = cv2.imread(fname)
-            if img is not None:
-                self.image_path = fname
-                self.cv_img = img
-                self.result_img = img.copy()
-                self.canvas.set_image(self.result_img)
-
-    def save_result(self):
-        if self.result_img is None:
-            return
-        fname = filedialog.asksaveasfilename(
-            title="Save Image",
-            defaultextension=".png",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")]
-        )
-        if fname:
-            cv2.imwrite(fname, self.result_img)
-
-    def detect_circle(self):
-        if self.cv_img is None:
-            return
-        # Use the entire image as the region
-        img_h, img_w = self.cv_img.shape[:2]
-        region = (0, 0, img_w, img_h)
-        print(f"Selected region (pixels): x={region[0]}, y={region[1]}, w={region[2]}, h={region[3]}")
-        temp_input = "_temp_input.jpg"
-        temp_output = "_temp_output.jpg"
-        cv2.imwrite(temp_input, self.cv_img)
-        found = detect_and_highlight_circle(temp_input, region, temp_output)
-        self.result_img = cv2.imread(temp_output)
-        self.canvas.set_image(self.result_img)
-        if found:
-            messagebox.showinfo("Result", "Concentric circles found and highlighted.")
-        else:
-            messagebox.showinfo("Result", "No matching concentric circles found.")
+    # Save images as PDF
+    processed_images[0].save(
+        output_pdf,
+        save_all=True,
+        append_images=processed_images[1:],
+        resolution=200
+    )
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = MainWindow(root)
-    root.mainloop()
+    root.withdraw()  # Hide the main window
+
+    input_pdf = filedialog.askopenfilename(
+        title="Select input PDF",
+        filetypes=[("PDF files", "*.pdf")]
+    )
+    if not input_pdf:
+        print("No input PDF selected.")
+        sys.exit(1)
+
+    output_pdf = filedialog.asksaveasfilename(
+        title="Save output PDF as",
+        defaultextension=".pdf",
+        filetypes=[("PDF files", "*.pdf")]
+    )
+    if not output_pdf:
+        print("No output PDF selected.")
+        sys.exit(1)
+
+    process_pdf(input_pdf, output_pdf)
+    print(f"Processed PDF saved to {output_pdf}")
